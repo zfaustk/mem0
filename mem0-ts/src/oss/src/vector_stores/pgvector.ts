@@ -22,6 +22,7 @@ export class PGVector implements VectorStore {
   private useHnsw: boolean;
   private readonly dbName: string;
   private config: PGVectorConfig;
+  private _initPromise?: Promise<void>;
 
   constructor(config: PGVectorConfig) {
     this.collectionName = config.collectionName || "memories";
@@ -41,6 +42,16 @@ export class PGVector implements VectorStore {
   }
 
   async initialize(): Promise<void> {
+    if (!this._initPromise) {
+      this._initPromise = this._doInitialize().catch((error) => {
+        this._initPromise = undefined;
+        throw error;
+      });
+    }
+    return this._initPromise;
+  }
+
+  private async _doInitialize(): Promise<void> {
     try {
       await this.client.connect();
 
@@ -207,129 +218,3 @@ export class PGVector implements VectorStore {
       `SELECT id, payload FROM ${this.collectionName} WHERE id = $1`,
       [vectorId],
     );
-
-    if (result.rows.length === 0) return null;
-
-    return {
-      id: result.rows[0].id,
-      payload: result.rows[0].payload,
-    };
-  }
-
-  async update(
-    vectorId: string,
-    vector: number[],
-    payload: Record<string, any>,
-  ): Promise<void> {
-    const vectorStr = `[${vector.join(",")}]`; // Format vector as string with square brackets
-    await this.client.query(
-      `
-      UPDATE ${this.collectionName}
-      SET vector = $1::vector, payload = $2::jsonb
-      WHERE id = $3
-      `,
-      [vectorStr, payload, vectorId],
-    );
-  }
-
-  async delete(vectorId: string): Promise<void> {
-    await this.client.query(
-      `DELETE FROM ${this.collectionName} WHERE id = $1`,
-      [vectorId],
-    );
-  }
-
-  async deleteCol(): Promise<void> {
-    await this.client.query(`DROP TABLE IF EXISTS ${this.collectionName}`);
-  }
-
-  private async listCols(): Promise<string[]> {
-    const result = await this.client.query(`
-      SELECT table_name
-      FROM information_schema.tables
-      WHERE table_schema = 'public'
-    `);
-    return result.rows.map((row) => row.table_name);
-  }
-
-  async list(
-    filters?: SearchFilters,
-    limit: number = 100,
-  ): Promise<[VectorStoreResult[], number]> {
-    const filterConditions: string[] = [];
-    const filterValues: any[] = [];
-    let paramIndex = 1;
-
-    if (filters) {
-      for (const [key, value] of Object.entries(filters)) {
-        filterConditions.push(`payload->>'${key}' = $${paramIndex}`);
-        filterValues.push(value);
-        paramIndex++;
-      }
-    }
-
-    const filterClause =
-      filterConditions.length > 0
-        ? "WHERE " + filterConditions.join(" AND ")
-        : "";
-
-    const listQuery = `
-      SELECT id, payload
-      FROM ${this.collectionName}
-      ${filterClause}
-      LIMIT $${paramIndex}
-    `;
-
-    const countQuery = `
-      SELECT COUNT(*)
-      FROM ${this.collectionName}
-      ${filterClause}
-    `;
-
-    filterValues.push(limit); // Add limit as the last parameter
-
-    const [listResult, countResult] = await Promise.all([
-      this.client.query(listQuery, filterValues),
-      this.client.query(countQuery, filterValues.slice(0, -1)), // Remove limit parameter for count query
-    ]);
-
-    const results = listResult.rows.map((row) => ({
-      id: row.id,
-      payload: row.payload,
-    }));
-
-    return [results, parseInt(countResult.rows[0].count)];
-  }
-
-  async close(): Promise<void> {
-    await this.client.end();
-  }
-
-  async getUserId(): Promise<string> {
-    const result = await this.client.query(
-      "SELECT user_id FROM memory_migrations LIMIT 1",
-    );
-
-    if (result.rows.length > 0) {
-      return result.rows[0].user_id;
-    }
-
-    // Generate a random user_id if none exists
-    const randomUserId =
-      Math.random().toString(36).substring(2, 15) +
-      Math.random().toString(36).substring(2, 15);
-    await this.client.query(
-      "INSERT INTO memory_migrations (user_id) VALUES ($1)",
-      [randomUserId],
-    );
-    return randomUserId;
-  }
-
-  async setUserId(userId: string): Promise<void> {
-    await this.client.query("DELETE FROM memory_migrations");
-    await this.client.query(
-      "INSERT INTO memory_migrations (user_id) VALUES ($1)",
-      [userId],
-    );
-  }
-}
